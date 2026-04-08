@@ -1,6 +1,6 @@
 [project]
 name = "course-dl"
-version = "0.3.0"
+version = "0.3.1"
 description = "Download Blackboard course exports from Curtin University's LMS"
 readme = "README.md"
 authors = [
@@ -14,6 +14,10 @@ dependencies = [
     "rapidfuzz",
     "InquirerPy",
 ]
+
+[project.urls]
+Homepage = "https://github.com/michael-borck/course-dl"
+Source = "https://github.com/michael-borck/course-dl"
 
 [dependency-groups]
 dev = [

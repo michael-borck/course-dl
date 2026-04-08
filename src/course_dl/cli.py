@@ -29,10 +29,18 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+_VERSION = "0.3.1"
+_REPO_URL = "https://github.com/michael-borck/course-dl"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="course-dl",
         description="Download Blackboard course exports from Curtin LMS",
+    )
+    parser.add_argument(
+        "-V", "--version", action="version",
+        version=f"%(prog)s {_VERSION}\n{_REPO_URL}",
     )
     parser.add_argument("-u", "--username", help="Curtin username")
     parser.add_argument("-p", "--password", help="Curtin password")
