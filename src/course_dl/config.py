@@ -1,4 +1,4 @@
-"""Credential and unit code resolution."""
+"""Credential and search term resolution."""
 
 from __future__ import annotations
 
@@ -27,45 +27,23 @@ def resolve_credentials(
     return username, password
 
 
-_UNIT_CODE_RE = re.compile(r"^[A-Z]{4}\d{4}$")
-
-
-def validate_unit_code(code: str) -> str:
-    """Validate and normalize a unit code."""
-    code = code.strip().upper()
-    if not _UNIT_CODE_RE.match(code):
-        raise ValueError(f"Invalid unit code: {code!r} (expected format: COMP1000)")
-    return code
-
-
-def resolve_unit_codes(
-    cli_units: list[str] | None = None,
+def resolve_search_terms(
+    cli_terms: list[str] | None = None,
     file_path: Path | None = None,
-) -> list[str]:
-    """Resolve unit codes from CLI args -> file -> interactive prompt."""
-    raw_codes: list[str] = []
+) -> list[str] | None:
+    """Resolve search terms from CLI args -> file.
 
-    if cli_units:
-        raw_codes = cli_units
+    Returns None if no terms provided (triggers interactive picker later).
+    """
+    raw_terms: list[str] = []
+
+    if cli_terms:
+        raw_terms = cli_terms
     elif file_path:
         if not file_path.exists():
             raise SystemExit(f"Error: file not found: {file_path}")
         text = file_path.read_text()
-        raw_codes = re.split(r"[,\n]+", text)
-    else:
-        user_input = input("Enter unit codes (comma-separated): ").strip()
-        if not user_input:
-            raise SystemExit("Error: no unit codes provided.")
-        raw_codes = user_input.split(",")
+        raw_terms = re.split(r"[,\n]+", text)
 
-    codes = []
-    for raw in raw_codes:
-        raw = raw.strip()
-        if not raw:
-            continue
-        codes.append(validate_unit_code(raw))
-
-    if not codes:
-        raise SystemExit("Error: no valid unit codes provided.")
-
-    return codes
+    terms = [t.strip() for t in raw_terms if t.strip()]
+    return terms if terms else None

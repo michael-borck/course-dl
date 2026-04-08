@@ -9,7 +9,7 @@ from playwright.sync_api import sync_playwright
 
 from course_dl.auth import login
 from course_dl.cli import build_parser
-from course_dl.config import resolve_credentials, resolve_unit_codes
+from course_dl.config import resolve_credentials, resolve_search_terms
 from course_dl.exporter import export_courses
 
 
@@ -34,18 +34,18 @@ def main() -> None:
 
     username, password = resolve_credentials(args.username, args.password)
 
-    # When --all is used, unit codes are optional
-    unit_codes: list[str] | None = None
+    # Resolve search terms (None = interactive picker later)
+    search_terms: list[str] | None = None
     if not args.download_all:
-        if args.units or args.file:
-            unit_codes = resolve_unit_codes(args.units or None, args.file)
-        else:
-            unit_codes = resolve_unit_codes(None, None)
+        search_terms = resolve_search_terms(args.search or None, args.file)
 
-    if unit_codes:
-        print(f"Will export courses for: {', '.join(unit_codes)}")
-    else:
+    if args.download_all:
         print("Will export all available courses")
+    elif search_terms:
+        print(f"Will search for: {', '.join(search_terms)}")
+    else:
+        print("No search terms — will show interactive picker after login")
+
     print(f"Output directory: {args.output_dir}")
     if not args.overwrite:
         print("Skipping already-downloaded courses (use --overwrite to re-download)")
@@ -58,10 +58,11 @@ def main() -> None:
         login(page, username, password, timeout=args.timeout)
         results = export_courses(
             page,
-            unit_codes,
+            search_terms,
             args.output_dir,
             download_all=args.download_all,
             overwrite=args.overwrite,
+            match_threshold=args.match_threshold,
             timeout=args.timeout,
         )
 

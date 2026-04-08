@@ -3,54 +3,45 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from course_dl.config import resolve_unit_codes, validate_unit_code
+from course_dl.config import resolve_search_terms
 
 
-class TestValidateUnitCode:
-    def test_valid_code(self) -> None:
-        assert validate_unit_code("COMP1000") == "COMP1000"
-
-    def test_lowercase_normalized(self) -> None:
-        assert validate_unit_code("comp1000") == "COMP1000"
-
-    def test_whitespace_stripped(self) -> None:
-        assert validate_unit_code("  ISAD1000  ") == "ISAD1000"
-
-    def test_invalid_format(self) -> None:
-        with pytest.raises(ValueError, match="Invalid unit code"):
-            validate_unit_code("ABC123")
-
-    def test_empty_string(self) -> None:
-        with pytest.raises(ValueError, match="Invalid unit code"):
-            validate_unit_code("")
-
-
-class TestResolveUnitCodes:
+class TestResolveSearchTerms:
     def test_cli_args(self) -> None:
-        codes = resolve_unit_codes(["COMP1000", "ISAD1000"], None)
-        assert codes == ["COMP1000", "ISAD1000"]
+        terms = resolve_search_terms(["COMP1000", "Data Structures"], None)
+        assert terms == ["COMP1000", "Data Structures"]
+
+    def test_preserves_case_and_spaces(self) -> None:
+        terms = resolve_search_terms(["Introduction to Programming"], None)
+        assert terms == ["Introduction to Programming"]
 
     def test_file_newline_separated(self, tmp_path: Path) -> None:
-        f = tmp_path / "units.txt"
-        f.write_text("COMP1000\nISAD1000\n")
-        codes = resolve_unit_codes(None, f)
-        assert codes == ["COMP1000", "ISAD1000"]
+        f = tmp_path / "terms.txt"
+        f.write_text("COMP1000\nData Structures\n")
+        terms = resolve_search_terms(None, f)
+        assert terms == ["COMP1000", "Data Structures"]
 
     def test_file_comma_separated(self, tmp_path: Path) -> None:
-        f = tmp_path / "units.txt"
-        f.write_text("COMP1000,ISAD1000")
-        codes = resolve_unit_codes(None, f)
-        assert codes == ["COMP1000", "ISAD1000"]
+        f = tmp_path / "terms.txt"
+        f.write_text("COMP1000, Data Structures")
+        terms = resolve_search_terms(None, f)
+        assert terms == ["COMP1000", "Data Structures"]
 
     def test_file_not_found(self) -> None:
         with pytest.raises(SystemExit, match="file not found"):
-            resolve_unit_codes(None, Path("/nonexistent"))
+            resolve_search_terms(None, Path("/nonexistent"))
 
-    def test_interactive_prompt(self) -> None:
-        with patch("builtins.input", return_value="COMP1000, ISAD1000"):
-            codes = resolve_unit_codes(None, None)
-        assert codes == ["COMP1000", "ISAD1000"]
+    def test_no_input_returns_none(self) -> None:
+        result = resolve_search_terms(None, None)
+        assert result is None
+
+    def test_empty_list_returns_none(self) -> None:
+        result = resolve_search_terms([], None)
+        assert result is None
+
+    def test_whitespace_only_returns_none(self) -> None:
+        result = resolve_search_terms(["  ", ""], None)
+        assert result is None
