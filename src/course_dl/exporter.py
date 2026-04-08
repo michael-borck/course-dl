@@ -1,4 +1,4 @@
-"""Blackboard course export download logic."""
+"""Blackboard course export: build and download logic."""
 
 from __future__ import annotations
 
@@ -6,50 +6,55 @@ import re
 from pathlib import Path
 
 from InquirerPy import inquirer
-from playwright.sync_api import Page
+from playwright.sync_api import Frame, Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from rapidfuzz import fuzz
 
+BLACKBOARD_COURSES_URL = "https://lms.curtin.edu.au/ultra/course"
+BASE_URL = "https://lms.curtin.edu.au"
+
+
+# ---------------------------------------------------------------------------
+# Course list & selection
+# ---------------------------------------------------------------------------
 
 def get_available_courses(page: Page, timeout: int = 60000) -> list[dict[str, str]]:
-    """Get list of courses available in Blackboard.
-
-    Returns list of dicts with keys: 'name', 'url'.
-    """
+    """Get list of courses from Blackboard Ultra courses page."""
     print("Fetching course list...")
+    page.goto(BLACKBOARD_COURSES_URL, wait_until="networkidle", timeout=timeout)
     page.wait_for_timeout(3000)
 
+    course_links = page.query_selector_all("a.course-title")
     courses: list[dict[str, str]] = []
-
-    # Navigate to the courses page
-    courses_url = "https://lms.curtin.edu.au/ultra/course"
-    page.goto(courses_url, wait_until="networkidle", timeout=timeout)
-    page.wait_for_timeout(3000)
-
-    # Look for course links — Blackboard Ultra uses course card links
-    course_links = page.query_selector_all("a[href*='/ultra/courses/']")
-
-    if not course_links:
-        # Fallback: try the classic Blackboard course list
-        course_links = page.query_selector_all(
-            "a[href*='/webapps/blackboard/execute/courseMain']"
-        )
-
-    if not course_links:
-        # Try broader selector for any course-like links
-        course_links = page.query_selector_all(
-            "[data-course-id] a, .course-element a, .course-org-list a"
-        )
-
-    for link in course_links:
+    for i, link in enumerate(course_links):
         name = (link.inner_text() or "").strip()
-        href = link.get_attribute("href") or ""
-        if not name or not href:
-            continue
-        courses.append({"name": name, "url": href})
+        if name:
+            courses.append({"name": name, "index": str(i)})
 
     print(f"  Found {len(courses)} courses")
     return courses
+
+
+def select_targets(
+    available: list[dict[str, str]],
+    search_terms: list[str] | None,
+    select_all: bool = False,
+    match_threshold: int = 60,
+) -> list[dict[str, str]]:
+    """Select target courses via --all, search terms, or interactive picker."""
+    print("\nAvailable courses:")
+    for i, c in enumerate(available, 1):
+        print(f"  {i}. {c['name']}")
+
+    if select_all:
+        return available
+
+    if search_terms:
+        print(f"\nMatching search terms (threshold: {match_threshold})...")
+        return fuzzy_match_courses(available, search_terms, match_threshold)
+
+    print()
+    return interactive_pick(available)
 
 
 def fuzzy_match_courses(
@@ -57,14 +62,9 @@ def fuzzy_match_courses(
     search_terms: list[str],
     threshold: int = 60,
 ) -> list[dict[str, str]]:
-    """Match courses using fuzzy string matching against search terms.
-
-    Each search term is compared against each course name. A course is
-    included if any term scores above the threshold. Uses token_set_ratio
-    so word order and extra words in the title don't penalise matches.
-    """
+    """Match courses using fuzzy string matching against search terms."""
     matched: list[dict[str, str]] = []
-    seen_urls: set[str] = set()
+    seen: set[str] = set()
 
     for term in search_terms:
         best_score = 0
@@ -72,20 +72,18 @@ def fuzzy_match_courses(
 
         for course in available:
             name = course["name"]
-            # Use token_set_ratio — handles partial matches well
-            score = fuzz.token_set_ratio(term.lower(), name.lower())
-            # Also try straight partial_ratio for short terms like "COMP1000"
-            partial = fuzz.partial_ratio(term.lower(), name.lower())
-            final_score = max(score, partial)
-
-            if final_score > best_score:
-                best_score = final_score
+            score = max(
+                fuzz.token_set_ratio(term.lower(), name.lower()),
+                fuzz.partial_ratio(term.lower(), name.lower()),
+            )
+            if score > best_score:
+                best_score = score
                 best_course = course
 
-        if best_course and best_score >= threshold and best_course["url"] not in seen_urls:
-            print(f"  '{term}' -> {best_course['name']} (score: {best_score})")
+        if best_course and best_score >= threshold and best_course["name"] not in seen:
+            print(f"  '{term}' -> {best_course['name'][:80]} (score: {best_score})")
             matched.append(best_course)
-            seen_urls.add(best_course["url"])
+            seen.add(best_course["name"])
         else:
             print(f"  '{term}' -> no match (best score: {best_score}, threshold: {threshold})")
 
@@ -93,15 +91,11 @@ def fuzzy_match_courses(
 
 
 def interactive_pick(available: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Show an interactive checkbox picker for course selection.
-
-    Arrow keys to move, space to toggle, enter to confirm.
-    """
+    """Show an interactive checkbox picker for course selection."""
     if not available:
         return []
 
     choices = [{"name": c["name"], "value": i} for i, c in enumerate(available)]
-
     selected = inquirer.checkbox(
         message="Select courses to export (space to toggle, enter to confirm):",
         choices=choices,
@@ -110,85 +104,50 @@ def interactive_pick(available: list[dict[str, str]]) -> list[dict[str, str]]:
     return [available[i] for i in selected]
 
 
+# ---------------------------------------------------------------------------
+# Skip detection
+# ---------------------------------------------------------------------------
+
 def already_downloaded(course_name: str, output_dir: Path) -> bool:
-    """Check if a course export already exists based on the course name."""
+    """Check if an export already exists locally for this course."""
     if not output_dir.exists():
         return False
-    # Build a simplified key from the course name for comparison
-    key = _sanitise_name(course_name)
+
+    code_match = re.search(r"[A-Z]{4}\d{4}", course_name.upper())
+    if not code_match:
+        return False
+
+    code = code_match.group(0)
     for f in output_dir.iterdir():
-        if f.suffix == ".zip" and key in _sanitise_name(f.name):
+        if code in f.name.upper() and f.suffix in (".zip", ".imscc"):
             return True
     return False
 
 
-def _sanitise_name(name: str) -> str:
-    """Lowercase and strip non-alphanumeric chars for loose comparison."""
-    return re.sub(r"[^a-z0-9]", "", name.lower())
+# ---------------------------------------------------------------------------
+# Step 1: Build (trigger CC exports)
+# ---------------------------------------------------------------------------
 
-
-def export_courses(
+def build_packages(
     page: Page,
-    search_terms: list[str] | None,
-    output_dir: Path,
-    download_all: bool = False,
-    overwrite: bool = False,
-    match_threshold: int = 60,
+    targets: list[dict[str, str]],
     timeout: int = 60000,
 ) -> dict[str, str]:
-    """Export and download courses from Blackboard.
+    """Trigger Common Cartridge builds for target courses.
 
-    Returns a dict of {course_name: status} where status is 'ok',
-    'skipped', or an error message.
+    Returns {course_name: status}.
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, str] = {}
-
-    available = get_available_courses(page, timeout)
-    if not available:
-        print("  No courses found in Blackboard.")
-        return results
-
-    # Display available courses
-    print("\nAvailable courses:")
-    for i, c in enumerate(available, 1):
-        print(f"  {i}. {c['name']}")
-
-    # Determine which courses to export
-    if download_all:
-        targets = available
-    elif search_terms:
-        print(f"\nMatching search terms (threshold: {match_threshold})...")
-        targets = fuzzy_match_courses(available, search_terms, match_threshold)
-        if not targets:
-            print("  No courses matched. Try lowering --match-threshold or omit search "
-                  "terms for interactive picker.")
-            return results
-    else:
-        # Interactive picker
-        print()
-        targets = interactive_pick(available)
-        if not targets:
-            print("  No courses selected.")
-            return results
-
-    print(f"\nWill export {len(targets)} course(s):")
-    for c in targets:
-        print(f"  - {c['name']}")
 
     for course in targets:
         label = course["name"]
-        print(f"\n--- {label} ---")
-
-        # Skip check
-        if not overwrite and already_downloaded(label, output_dir):
-            print("  Already downloaded, skipping (use --overwrite to re-download)")
-            results[label] = "skipped"
-            continue
+        print(f"\n--- {label[:80]} ---")
 
         try:
-            _export_one(page, course, output_dir, timeout)
-            results[label] = "ok"
+            _navigate_to_course(page, course, timeout)
+            _trigger_cc_build(page, timeout)
+            results[label] = "queued"
+            print("  Build queued successfully")
         except Exception as e:
             print(f"  Error: {e}")
             results[label] = str(e)
@@ -196,207 +155,252 @@ def export_courses(
     return results
 
 
-def _export_one(
-    page: Page, course: dict[str, str], output_dir: Path, timeout: int
-) -> None:
-    """Export a single course from Blackboard."""
-    course_name = course["name"]
-    course_url = course["url"]
+# ---------------------------------------------------------------------------
+# Step 2: Download
+# ---------------------------------------------------------------------------
 
-    # Make URL absolute if needed
-    if course_url.startswith("/"):
-        course_url = f"https://lms.curtin.edu.au{course_url}"
+def download_packages(
+    page: Page,
+    targets: list[dict[str, str]],
+    output_dir: Path,
+    overwrite: bool = False,
+    timeout: int = 60000,
+) -> dict[str, str]:
+    """Download ready packages for target courses.
 
-    # Navigate to the course
-    print(f"  Opening course: {course_name}")
-    page.goto(course_url, wait_until="networkidle", timeout=timeout)
+    Returns {course_name: status}.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results: dict[str, str] = {}
+
+    for course in targets:
+        name = course["name"]
+        print(f"\n--- {name[:80]} ---")
+
+        if not overwrite and already_downloaded(name, output_dir):
+            print("  Already downloaded locally, skipping (use --overwrite)")
+            results[name] = "skipped"
+            continue
+
+        try:
+            packages = _get_packages(page, course, timeout)
+
+            if not packages:
+                print("  No packages ready yet — try again later")
+                results[name] = "not ready"
+                continue
+
+            pkg = packages[0]
+            print(f"  Found: {pkg['name']}")
+
+            if len(packages) > 1:
+                print(f"  ({len(packages)} packages available, downloading most recent)")
+                for p in packages[1:]:
+                    print(f"    also available: {p['name']}")
+
+            _download_file(page, pkg, output_dir, timeout)
+            results[name] = "ok"
+
+            # Clean up: delete from BB only if it was the sole package
+            if len(packages) == 1:
+                _delete_package(page, pkg, timeout)
+                print("  Cleaned up package from Blackboard")
+            else:
+                print("  Multiple packages exist — skipping Blackboard cleanup")
+
+        except Exception as e:
+            print(f"  Error: {e}")
+            results[name] = str(e)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Navigation helpers
+# ---------------------------------------------------------------------------
+
+def _navigate_to_course(page: Page, course: dict[str, str], timeout: int) -> None:
+    """Navigate to a course by clicking its link on the courses page."""
+    print("  Navigating to course...")
+    page.goto(BLACKBOARD_COURSES_URL, wait_until="networkidle", timeout=timeout)
     page.wait_for_timeout(3000)
 
-    # Try Ultra flow first, then Classic
-    if _try_ultra_export(page, course_name, output_dir, timeout):
-        return
+    course_links = page.query_selector_all("a.course-title")
+    idx = int(course["index"])
+    if idx >= len(course_links):
+        raise RuntimeError("Course link no longer at expected position")
 
-    if _try_classic_export(page, course_name, output_dir, timeout):
-        return
-
-    raise RuntimeError(
-        f"Could not find export option for {course_name}. "
-        "Run with --visible to debug."
-    )
+    course_links[idx].click()
+    page.wait_for_timeout(5000)
+    page.wait_for_load_state("networkidle", timeout=timeout)
 
 
-def _try_ultra_export(
-    page: Page, course_name: str, output_dir: Path, timeout: int
-) -> bool:
-    """Attempt Blackboard Ultra export flow."""
-    settings_btn = page.query_selector(
-        "[data-ng-click*='settings'], "
-        "button[aria-label*='Settings'], "
-        "button[aria-label*='Course settings'], "
-        "a[href*='settings']"
-    )
-    if not settings_btn:
-        settings_btn = page.query_selector(
-            "button[aria-label*='More options'], "
-            "button[aria-label*='Course management']"
-        )
+def _get_classic_frame(page: Page) -> Frame | None:
+    """Find the classic Blackboard iframe within Ultra."""
+    for frame in page.frames:
+        if "webapps" in frame.url and "execute" in frame.url:
+            return frame
+    return None
 
-    if not settings_btn:
-        return False
 
-    settings_btn.click()
-    page.wait_for_timeout(2000)
+def _get_frame_by_url(page: Page, url_fragment: str) -> Frame | None:
+    """Find a frame whose URL contains the given fragment."""
+    for frame in page.frames:
+        if url_fragment in frame.url:
+            return frame
+    return None
 
-    export_link = page.query_selector(
-        "a:has-text('Export'), "
-        "a:has-text('Archive'), "
-        "button:has-text('Export'), "
-        "button:has-text('Archive'), "
-        "[role='menuitem']:has-text('Export')"
-    )
 
+def _navigate_to_archive(page: Page, timeout: int) -> Frame:
+    """Navigate sidebar to Export/Archive page, return the frame."""
+    classic_frame = _get_classic_frame(page)
+    if not classic_frame:
+        raise RuntimeError("Classic Blackboard frame not found")
+
+    pkg_link = classic_frame.query_selector("a:has-text('Packages and Utilities')")
+    if not pkg_link:
+        raise RuntimeError("'Packages and Utilities' not found in sidebar")
+    pkg_link.click()
+    page.wait_for_timeout(1000)
+
+    export_link = classic_frame.query_selector("a:has-text('Export/Archive Course')")
     if not export_link:
-        return False
-
+        raise RuntimeError("'Export/Archive Course' link not found")
     export_link.click()
     page.wait_for_timeout(3000)
+    page.wait_for_load_state("networkidle", timeout=timeout)
 
-    _select_all_content(page)
+    archive_frame = _get_frame_by_url(page, "archive_manager")
+    if not archive_frame:
+        raise RuntimeError("Archive manager frame not found")
 
-    submit_btn = page.query_selector(
-        "button:has-text('Export'), "
-        "input[type='submit'][value*='Export'], "
-        "button[type='submit']"
-    )
-    if submit_btn:
-        submit_btn.click()
-        page.wait_for_timeout(5000)
-
-    return _download_export_file(page, course_name, output_dir, timeout)
+    return archive_frame
 
 
-def _try_classic_export(
-    page: Page, course_name: str, output_dir: Path, timeout: int
-) -> bool:
-    """Attempt Classic Blackboard export flow."""
-    control_panel = page.query_selector(
-        "#controlPanel, "
-        "a:has-text('Control Panel'), "
-        "a:has-text('Course Management'), "
-        "#courseMenuPalette_contents a:has-text('Packages'), "
-        "a[href*='exportCourse'], "
-        "a[href*='export']"
-    )
-
-    if not control_panel:
-        sidebar_links = page.query_selector_all("#courseMenuPalette_contents a, .navItem a")
-        for link in sidebar_links:
-            text = (link.inner_text() or "").strip().lower()
-            if "package" in text or "export" in text or "control" in text:
-                control_panel = link
+def _read_packages_table(archive_frame: Frame) -> list[dict[str, str]]:
+    """Read available packages from the archive manager table."""
+    packages: list[dict[str, str]] = []
+    rows = archive_frame.query_selector_all("#userCreatedPackagesList_datatable tr")
+    for row in rows[1:]:
+        # Search all cells — column order may vary due to sorting
+        for link in row.query_selector_all("a"):
+            href = link.get_attribute("href") or ""
+            if "/bbcswebdav/" in href:
+                name = (link.inner_text() or "").strip()
+                if name:
+                    packages.append({"name": name, "href": href})
                 break
+    return packages
 
-    if not control_panel:
-        return False
 
-    control_panel.click()
-    page.wait_for_timeout(2000)
+# ---------------------------------------------------------------------------
+# Build step internals
+# ---------------------------------------------------------------------------
 
-    packages_link = page.query_selector(
-        "a:has-text('Packages and Utilities'), "
-        "a:has-text('Packages & Utilities')"
+def _trigger_cc_build(page: Page, timeout: int) -> None:
+    """Navigate sidebar to Export/Archive, trigger CC export."""
+    archive_frame = _navigate_to_archive(page, timeout)
+
+    cc_link = archive_frame.query_selector(
+        "a:has-text('Export Common Cartridge Package')"
     )
-    if packages_link:
-        packages_link.click()
-        page.wait_for_timeout(2000)
+    if not cc_link:
+        raise RuntimeError("'Export Common Cartridge Package' link not found")
 
-    export_link = page.query_selector(
-        "a:has-text('Export Course'), "
-        "a:has-text('Export/Archive Course'), "
-        "a[href*='exportCourse']"
-    )
-    if not export_link:
-        return False
-
-    export_link.click()
+    print("  Clicking Export Common Cartridge Package...")
+    cc_link.click()
     page.wait_for_timeout(3000)
+    page.wait_for_load_state("networkidle", timeout=timeout)
 
-    _select_all_content(page)
+    cc_frame = _get_frame_by_url(page, "commonCartridge")
+    if not cc_frame:
+        cc_frame = _get_frame_by_url(page, "contentExchange")
+    if not cc_frame:
+        raise RuntimeError("Common Cartridge export form not found")
 
-    submit_btn = page.query_selector(
-        "input[type='submit'][value*='Export'], "
-        "button:has-text('Export'), "
-        "input[name='bottom_Submit']"
-    )
-    if submit_btn:
-        submit_btn.click()
-        page.wait_for_timeout(5000)
+    submit_btn = cc_frame.query_selector("input[name='bottom_Submit']")
+    if not submit_btn:
+        raise RuntimeError("Submit button not found on CC export form")
 
-    return _download_export_file(page, course_name, output_dir, timeout)
+    print("  Submitting build request...")
+    submit_btn.click()
+    page.wait_for_timeout(3000)
+    page.wait_for_load_state("networkidle", timeout=timeout)
+
+    # Verify success message
+    archive_frame = _get_frame_by_url(page, "archive_manager")
+    if archive_frame:
+        receipt = archive_frame.query_selector(".receipt, #goodMsg1")
+        if receipt:
+            msg = (receipt.inner_text() or "").strip()[:100]
+            print(f"  Blackboard says: {msg}")
 
 
-def _select_all_content(page: Page) -> None:
-    """Select all content checkboxes in the export form."""
-    select_all = page.query_selector(
-        "input[type='checkbox'][id*='selectAll'], "
-        "input[type='checkbox'][name*='selectAll'], "
-        "a:has-text('Select All'), "
-        "label:has-text('Select All')"
-    )
-    if select_all:
-        tag = select_all.evaluate("el => el.tagName.toLowerCase()")
-        if tag == "input":
-            select_all.check()
-        else:
-            select_all.click()
-        page.wait_for_timeout(1000)
+# ---------------------------------------------------------------------------
+# Download step internals
+# ---------------------------------------------------------------------------
+
+def _get_packages(
+    page: Page, course: dict[str, str], timeout: int
+) -> list[dict[str, str]]:
+    """Navigate to Export/Archive page and list available packages."""
+    _navigate_to_course(page, course, timeout)
+    archive_frame = _navigate_to_archive(page, timeout)
+    return _read_packages_table(archive_frame)
+
+
+def _download_file(
+    page: Page,
+    package: dict[str, str],
+    output_dir: Path,
+    timeout: int,
+) -> None:
+    """Download a package file by clicking its link."""
+    archive_frame = _get_frame_by_url(page, "archive_manager")
+    if not archive_frame:
+        raise RuntimeError("Archive frame not found for download")
+
+    link = archive_frame.query_selector(f"a[href='{package['href']}']")
+    if not link:
+        raise RuntimeError("Download link not found in table")
+
+    print("  Downloading...")
+    with page.expect_download(timeout=timeout) as download_info:
+        link.click()
+    download = download_info.value
+
+    filename = download.suggested_filename or f"{package['name']}.zip"
+    dest = output_dir / filename
+    download.save_as(dest)
+    print(f"  Saved: {dest}")
+
+
+def _delete_package(
+    page: Page,
+    package: dict[str, str],
+    timeout: int,
+) -> None:
+    """Delete a package from Blackboard (only when it's the sole package)."""
+    archive_frame = _get_frame_by_url(page, "archive_manager")
+    if not archive_frame:
         return
 
-    checkboxes = page.query_selector_all(
-        "input[type='checkbox'][name*='content'], "
-        "input[type='checkbox'][id*='content']"
+    checkboxes = archive_frame.query_selector_all(
+        "#userCreatedPackagesList_datatable input[type='checkbox']"
     )
-    for cb in checkboxes:
-        if not cb.is_checked():
-            cb.check()
+    if len(checkboxes) == 1:
+        checkboxes[0].check()
+        page.wait_for_timeout(500)
 
-
-def _download_export_file(
-    page: Page, course_name: str, output_dir: Path, timeout: int
-) -> bool:
-    """Wait for the export to be ready and download it."""
-    max_polls = 12
-    for attempt in range(max_polls):
-        download_link = page.query_selector(
-            "a[href*='export'], "
-            "a[href*='download'], "
-            "a[href*='.zip'], "
-            "a:has-text('Download')"
+        delete_btn = archive_frame.query_selector(
+            "input[value='Delete'], button:has-text('Delete'), a:has-text('Delete')"
         )
-
-        if download_link:
-            print("  Downloading export...")
-            try:
-                with page.expect_download(timeout=timeout) as download_info:
-                    download_link.click()
-                download = download_info.value
-
-                filename = download.suggested_filename or f"{_sanitise_name(course_name)}.zip"
-                dest = output_dir / filename
-                download.save_as(dest)
-                print(f"  Saved: {dest}")
-                return True
-            except PlaywrightTimeout:
-                print("  Download timed out, retrying...")
-
-        processing = page.query_selector(
-            ":has-text('processing'), :has-text('Building'), :has-text('queued')"
-        )
-        if processing or attempt < max_polls - 1:
-            print(f"  Export in progress... (attempt {attempt + 1}/{max_polls})")
-            page.wait_for_timeout(10000)
-            page.reload(wait_until="networkidle", timeout=timeout)
-        else:
-            break
-
-    return False
+        if delete_btn:
+            delete_btn.click()
+            page.wait_for_timeout(2000)
+            ok_btn = archive_frame.query_selector(
+                "input[value='OK'], button:has-text('OK')"
+            )
+            if ok_btn:
+                ok_btn.click()
+                page.wait_for_timeout(2000)
