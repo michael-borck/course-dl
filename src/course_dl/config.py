@@ -43,7 +43,7 @@ def resolve_search_terms(
         if not file_path.exists():
             raise SystemExit(f"Error: file not found: {file_path}")
         text = file_path.read_text()
-        raw_terms = re.split(r"[,\n]+", text)
+        raw_terms = text.splitlines()
 
     terms = [t.strip() for t in raw_terms if t.strip()]
     return terms if terms else None

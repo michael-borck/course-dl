@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-f",
         "--file",
         type=Path,
-        help="File containing search terms (one per line or comma-separated)",
+        help="File containing search terms (one per line)",
     )
     parser.add_argument("-u", "--username", help="Curtin username")
     parser.add_argument("-p", "--password", help="Curtin password")

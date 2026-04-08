@@ -24,11 +24,11 @@ class TestResolveSearchTerms:
         terms = resolve_search_terms(None, f)
         assert terms == ["COMP1000", "Data Structures"]
 
-    def test_file_comma_separated(self, tmp_path: Path) -> None:
+    def test_file_preserves_commas(self, tmp_path: Path) -> None:
         f = tmp_path / "terms.txt"
-        f.write_text("COMP1000, Data Structures")
+        f.write_text("Unix, C and Systems Programming\nCOMP1000\n")
         terms = resolve_search_terms(None, f)
-        assert terms == ["COMP1000", "Data Structures"]
+        assert terms == ["Unix, C and Systems Programming", "COMP1000"]
 
     def test_file_not_found(self) -> None:
         with pytest.raises(SystemExit, match="file not found"):
