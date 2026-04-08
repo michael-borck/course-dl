@@ -1,6 +1,6 @@
 [project]
 name = "course-dl"
-version = "0.2.0"
+version = "0.2.1"
 description = "Download Blackboard course exports from Curtin University's LMS"
 readme = "README.md"
 authors = [
